@@ -1,31 +1,50 @@
 <?php
+namespace AssyncLab\Helpers;
+
 use Aws\S3\S3Client;
 use Aws\Exception\AwsException;
 
 final class S3Helper
 {
     private static ?S3Client $client = null;
-    private static string $bucket = 'dadoscorretor';
-    private static string $endpoint = 'http://localhost:9000';
-    private static string $accessKey = '<spaces-key>';
-    private static string $secretKey = '<spaces-secret>';
+    private static string $bucket;
+
+    public static function init(
+        string $endpoint,
+        string $bucket,
+        string $accessKey,
+        string $secretKey,
+        string $region
+    ): void {
+        self::$bucket = $bucket;
+
+        self::$client = new S3Client([
+            'version'                 => 'latest',
+            'region'                  => $region,
+            'endpoint'                => $endpoint,
+            'use_path_style_endpoint' => true,
+            'credentials'             => [
+                'key'    => $accessKey,
+                'secret' => $secretKey,
+            ],
+            'suppress_php_deprecation_warning' => true,
+        ]);
+    }
 
     public static function getClient(): S3Client
     {
         if (!self::$client) {
-            self::$client = new S3Client([
-                'version'                 => 'latest',
-                'region'                  => 'us-east-1',
-                'endpoint'                => self::$endpoint,
-                'use_path_style_endpoint' => true,
-                'credentials'             => [
-                    'key'    => self::$accessKey,
-                    'secret' => self::$secretKey,
-                ],
-                'suppress_php_deprecation_warning' => true,
-            ]);
+            throw new \RuntimeException('S3Helper não foi inicializado. Chame S3Helper::init(...) antes.');
         }
         return self::$client;
+    }
+
+    public static function getBucket(): string
+    {
+        if (!isset(self::$bucket)) {
+            throw new \RuntimeException('S3Helper não foi inicializado. Chame S3Helper::init(...) antes.');
+        }
+        return self::$bucket;
     }
 
     public static function uploadFile(string $filePath, string $key): bool

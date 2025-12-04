@@ -1,26 +1,39 @@
 <?php
+namespace AssyncLab\Helpers;
 
-use helpers\S3Helper;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
+use FilesystemIterator;
 
 final class GhostscriptHelper
 {
+    // Ajuste o caminho para o executável do Ghostscript dentro do projeto ou no sistema
+    // Exemplo com caminho absoluto:
+    // private static string $gsPath = '"C:\\Program Files\\gs\\gs10.05.1\\bin\\gswin64c.exe"';
+    // Exemplo com binário dentro do projeto:
+    // private static string $gsPath = '"' . __DIR__ . '/../bin/ghostscript/gswin64c.exe"';
     private static string $gsPath = '"C:\\Program Files\\gs\\gs10.05.1\\bin\\gswin64c.exe"';
 
+    /**
+     * Converte um PDF em JPG(s) 848x1168 via Ghostscript e envia para o S3.
+     * Retorna a quantidade de imagens enviadas.
+     */
     public static function converterPdfParaImagens(string $pdfPath, string $pdfName, string $s3Prefix): int
     {
         $enviadas = 0;
-        $baseName = pathinfo($pdfName, PATHINFO_FILENAME);
         $tempDir  = sys_get_temp_dir() . DIRECTORY_SEPARATOR . uniqid('pdf_', true);
 
         if (!mkdir($tempDir, 0777, true) && !is_dir($tempDir)) {
-            throw new RuntimeException(sprintf('Diretório temporário não pôde ser criado: %s', $tempDir));
+            throw new \RuntimeException(sprintf('Diretório temporário não pôde ser criado: %s', $tempDir));
         }
 
-        $outputPattern = $tempDir . DIRECTORY_SEPARATOR . $baseName . '_page_%03d.jpg';
+        $outputPattern = $tempDir . DIRECTORY_SEPARATOR . 'page_%03d.jpg';
         $logFile       = $tempDir . DIRECTORY_SEPARATOR . 'gs_error.log';
 
+        // -g848x1168 define a grade em pixels
+        // -r150 e -dJPEGQ=90 equilibram qualidade × tamanho
         $cmd = sprintf(
-            '%s -dSAFER -dBATCH -dNOPAUSE -sDEVICE=jpeg -r150 -sOutputFile="%s" "%s" 2> "%s"',
+            '%s -dSAFER -dBATCH -dNOPAUSE -sDEVICE=jpeg -r150 -dJPEGQ=90 -g848x1168 -sOutputFile="%s" "%s" 2> "%s"',
             self::$gsPath,
             $outputPattern,
             $pdfPath,
@@ -63,13 +76,18 @@ final class GhostscriptHelper
         if (!is_dir($dir)) {
             return;
         }
+
         $files = new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
             RecursiveIteratorIterator::CHILD_FIRST
         );
+
         foreach ($files as $file) {
-            $file->isDir() ? rmdir($file->getRealPath()) : unlink($file->getRealPath());
+            $file->isDir()
+                ? rmdir($file->getRealPath())
+                : unlink($file->getRealPath());
         }
+
         rmdir($dir);
     }
 }

@@ -1,40 +1,77 @@
 <?php
-
 declare(strict_types=1);
 
-require __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/../vendor/autoload.php';
 
-use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Message\AMQPMessage;
+use AssyncLab\Helpers\RabbitMQHelper;
+use AssyncLab\Helpers\ZipHelper;
+use AssyncLab\Helpers\S3Helper;
+use Monolog\Logger;
+use Monolog\Handler\StreamHandler;
 
-$rabbitHost = 'localhost';
-$rabbitPort = 5672;
-$rabbitUser = 'guest';
-$rabbitPass = 'guest';
-$queueName  = 'normalizacao_queue';
+$queueName = 'normalizacao_queue';
+
+$options = getopt('', [
+    's3-endpoint:',
+    's3-bucket:',
+    's3-access-key:',
+    's3-secret-key:',
+    's3-region:',
+    'mq-host:',
+    'mq-port:',
+    'mq-user:',
+    'mq-pass:',
+]);
+
+$required = [
+    's3-endpoint', 's3-bucket', 's3-access-key', 's3-secret-key', 's3-region',
+    'mq-host', 'mq-port', 'mq-user', 'mq-pass',
+];
+
+foreach ($required as $opt) {
+    if (empty($options[$opt])) {
+        fwrite(STDERR, "Parâmetro obrigatório ausente: --{$opt}\n");
+        exit(1);
+    }
+}
+
+AssyncLab\Helpers\S3Helper::init(
+    $options['s3-endpoint'],
+    $options['s3-bucket'],
+    $options['s3-access-key'],
+    $options['s3-secret-key'],
+    $options['s3-region']
+);
+
+AssyncLab\Helpers\RabbitMQHelper::init(
+    $options['mq-host'],
+    (int)$options['mq-port'],
+    $options['mq-user'],
+    $options['mq-pass']
+);
 
 echo "[*] Iniciando worker de normalização...\n";
 
-$connection = new AMQPStreamConnection($rabbitHost, $rabbitPort, $rabbitUser, $rabbitPass);
+$connection = RabbitMQHelper::getConnection();
 $channel    = $connection->channel();
 
 $channel->queue_declare($queueName, false, true, false, false);
 
 $callback = function (AMQPMessage $msg) {
-    echo "[x] Mensagem recebida: ", $msg->body, "\n";
+    echo "[x] Mensagem recebida: ", $msg->getBody(), "\n";
 
-    $data = json_decode($msg->body, true);
+    $data = json_decode($msg->getBody(), true);
     if (!is_array($data)) {
         echo "[!] Payload inválido, descartando.\n";
         $msg->ack();
         return;
     }
 
-    // Exemplo de campos esperados:
-    // nomeLote, zipKey, bucket, callbackUrl
     $nomeLote    = $data['nomeLote']    ?? null;
     $zipKey      = $data['zipKey']      ?? null;
-    $bucket      = $data['bucket']      ?? 'dadoscorretor';
+    $bucket      = $data['bucket']      ?? S3Helper::getBucket();
+    $loteId      = $data['loteIdNumerico']       ?? null;
     $callbackUrl = $data['callbackUrl'] ?? null;
 
     if (!$nomeLote || !$zipKey || !$callbackUrl) {
@@ -43,44 +80,136 @@ $callback = function (AMQPMessage $msg) {
         return;
     }
 
+    // ======== MONOLOG POR LOTE ========
+    $logDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'normalizer_logs';
+    if (!is_dir($logDir) && !mkdir($logDir, 0777, true) && !is_dir($logDir)) {
+        fwrite(STDERR, "Não foi possível criar diretório de logs {$logDir}\n");
+        $msg->ack();
+        return;
+    }
+
+    $logFileName = 'lote_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $nomeLote) . '_' . date('Ymd_His') . '.log';
+    $logPath     = $logDir . DIRECTORY_SEPARATOR . $logFileName;
+
+    $logger = new Logger('normalizer');
+    $logger->pushHandler(new StreamHandler($logPath, Logger::DEBUG));
+
+    $logger->info('Mensagem recebida para normalização', [
+        'nomeLote' => $nomeLote,
+        'loteId' => $loteId,
+        'zipKey'   => $zipKey,
+        'bucket'   => $bucket,
+    ]);
+
     try {
         // 1) Avisar PHP: started
         enviarCallback($callbackUrl, [
             'nomeLote' => $nomeLote,
             'event'    => 'started',
         ]);
+        $logger->info('Callback started enviado', ['callbackUrl' => $callbackUrl]);
 
-        // 2) TODO: baixar ZIP do S3, extrair, chamar Ghostscript, gerar imagens normalizadas
-        // 3) TODO: subir imagens normalizadas para o bucket (prefixo normalizado)
-        $normalizedPrefix = "normalizados/{$nomeLote}/"; // depois ajustamos o padrão
+        // 2) Baixar ZIP bruto do S3 para /tmp
+        $s3     = S3Helper::getClient();
+        $tmpDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'normalizer_' . uniqid('', true);
 
-        // 4) Avisar PHP: finished
-        enviarCallback($callbackUrl, [
-            'nomeLote'        => $nomeLote,
-            'event'           => 'finished',
-            'normalizedPrefix'=> $normalizedPrefix,
+        if (!mkdir($tmpDir, 0777, true) && !is_dir($tmpDir)) {
+            throw new \RuntimeException("Não foi possível criar diretório temporário: {$tmpDir}");
+        }
+
+        $logger->info('Baixando ZIP do S3', ['tmpDir' => $tmpDir]);
+
+        $zipLocalPath = $tmpDir . DIRECTORY_SEPARATOR . 'input.zip';
+
+        $s3->getObject([
+            'Bucket' => $bucket,
+            'Key'    => $zipKey,
+            'SaveAs' => $zipLocalPath,
         ]);
 
-        // 5) TODO: enviar mensagem para o Java (respostas_queue) com inputPath...
+        $logger->info('ZIP baixado', ['zipLocalPath' => $zipLocalPath]);
+
+        $normalizedPrefix = "cliente/saeb/uploads/normalizadas/{$nomeLote}/";
+        $totalImagens     = ZipHelper::processarZip($zipLocalPath, $normalizedPrefix);
+
+        $logger->info('ZIP processado', [
+            'normalizedPrefix' => $normalizedPrefix,
+            'totalImagens'     => $totalImagens,
+        ]);
+
+        if ($totalImagens === 0) {
+            throw new \RuntimeException('Nenhuma imagem normalizada enviada para o bucket.');
+        }
+
+// 4) Avisar PHP: finished (usa callbackUrl original)
+        enviarCallback($callbackUrl, [
+            'nomeLote'         => $nomeLote,
+            'event'            => 'finished',
+            'normalizedPrefix' => $normalizedPrefix,
+            'totalImagens'     => $totalImagens,
+        ]);
+
+        // ✅ NÃO SOBRESCREVER callbackUrl!
+        // Envia para Java usando o MESMO callbackUrl original
+        RabbitMQHelper::enviarParaFila('respostas_queue', [
+            'inputPath' => "s3://{$bucket}/{$normalizedPrefix}",
+            'nomeLote'  => $nomeLote,
+            'total'     => $totalImagens,
+            'loteIdNumerico' => $loteId,
+            'callbackUrl' => $callbackUrl,  // ✅ CORRETO: original do payload
+        ]);
+        $logger->info('Mensagem enviada para respostas_queue', [
+            'inputPath' => "s3://{$bucket}/{$normalizedPrefix}",
+            'callbackUrl' => $callbackUrl  // ✅ Log para confirmar
+        ]);
+
+        // 6) Subir log para o S3
+        foreach ($logger->getHandlers() as $handler) {
+            if ($handler instanceof StreamHandler) {
+                $handler->close();
+            }
+        }
+
+        $logS3Key = "cliente/saeb/uploads/{$nomeLote}/logs/{$logFileName}";
+        S3Helper::uploadFile($logPath, $logS3Key);
+        $logger->info('Log enviado para S3', ['logKey' => $logS3Key]);
+
+        // Limpeza
+        if (file_exists($logPath)) {
+            @unlink($logPath);
+        }
+        limparDiretorioRecursivo($tmpDir);
 
         $msg->ack();
-        echo "[✓] Lote {$nomeLote} processado (normalização concluída).\n";
-    } catch (Throwable $e) {
-        echo "[!] Erro ao processar lote {$nomeLote}: {$e->getMessage()}\n";
+        echo "[✓] Lote {$nomeLote} normalizado ({$totalImagens} imagens).\n";
+    } catch (\Throwable $e) {
+        $logger->error('Erro ao processar lote', ['exception' => $e->getMessage()]);
+
+        // Fecha handlers antes de enviar log para o S3
+        foreach ($logger->getHandlers() as $handler) {
+            if ($handler instanceof StreamHandler) {
+                $handler->close();
+            }
+        }
+
+        $logS3Key = "logs/normalizer/{$logFileName}";
+        S3Helper::uploadFile($logPath, $logS3Key);
 
         if ($callbackUrl) {
-            // Tenta avisar erro de normalização
             enviarCallback($callbackUrl, [
-                'nomeLote'    => $nomeLote,
-                'event'       => 'error',
-                'errorMessage'=> $e->getMessage(),
+                'nomeLote'     => $nomeLote,
+                'event'        => 'error',
+                'errorMessage' => $e->getMessage(),
+                'logKey'       => $logS3Key,
             ]);
         }
 
-        // Dependendo da estratégia, você pode:
-        // - reencolar (nack + requeue = true)
-        // - ou descartar (ack) para não travar a fila
+        if (file_exists($logPath)) {
+            @unlink($logPath);
+        }
+
         $msg->ack();
+        echo "[!] Erro ao processar lote {$nomeLote}: {$e->getMessage()}\n";
     }
 };
 
@@ -97,7 +226,7 @@ $channel->close();
 $connection->close();
 
 /**
- * Envia callback HTTP simples (POST JSON).
+ * Callback HTTP para o PHP web.
  */
 function enviarCallback(string $url, array $payload): void
 {
@@ -116,8 +245,33 @@ function enviarCallback(string $url, array $payload): void
     if ($response === false || $httpCode >= 400) {
         $err = curl_error($ch) ?: "HTTP {$httpCode}";
         curl_close($ch);
-        throw new RuntimeException("Falha no callback para {$url}: {$err}");
+        throw new \RuntimeException("Falha no callback para {$url}: {$err}");
     }
 
     curl_close($ch);
+}
+
+/**
+ * Remove diretório recursivamente.
+ */
+function limparDiretorioRecursivo(string $dir): void
+{
+    if (!is_dir($dir)) {
+        return;
+    }
+
+    $files = new \RecursiveIteratorIterator(
+        new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS),
+        \RecursiveIteratorIterator::CHILD_FIRST
+    );
+
+    foreach ($files as $file) {
+        if ($file->isDir()) {
+            @rmdir($file->getRealPath());
+        } else {
+            @unlink($file->getRealPath());
+        }
+    }
+
+    @rmdir($dir);
 }
