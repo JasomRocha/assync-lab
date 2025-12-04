@@ -1,6 +1,7 @@
 <?php
 namespace AssyncLab\Helpers;
 
+use AssyncLab\Helpers\S3Helper;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use FilesystemIterator;
@@ -31,6 +32,13 @@ final class ZipHelper
             $zip->extractTo($tempDir);
             $zip->close();
 
+            // ✅ Extrai nome do lote do prefixo S3
+            // Ex: "cliente/saeb/normalizadas/LOTE123/" -> "LOTE123"
+            $nomeLote = basename(rtrim($s3Prefix, '/'));
+
+            // ✅ Contador para paginação sequencial
+            $contador = 1;
+
             $it = new RecursiveIteratorIterator(
                 new RecursiveDirectoryIterator($tempDir, FilesystemIterator::SKIP_DOTS)
             );
@@ -45,11 +53,17 @@ final class ZipHelper
                 $ext  = strtolower(pathinfo($name, PATHINFO_EXTENSION));
 
                 if (in_array($ext, ['jpg', 'jpeg'], true)) {
-                    // Imagens: ImageMagick
-                    $enviadas += ImageMagickHelper::normalizarImagem($path, $name, $s3Prefix);
+                    $novoNome = "{$nomeLote}_pag{$contador}.{$ext}";
+
+                    //Imagens: ImageMagick
+                    //$enviadas += ImageMagickHelper::normalizarImagem($path, $novoNome, $s3Prefix);
+                    if (S3Helper::uploadFile($path, $s3Prefix . $novoNome)) {
+                        $enviadas++;
+                        $contador++;
+                    }
                 } elseif ($ext === 'pdf') {
-                    // PDFs: Ghostscript
-                    $enviadas += GhostscriptHelper::converterPdfParaImagens($path, $name, $s3Prefix);
+                    // ✅ PDFs: Ghostscript (passa contador por referência para continuar sequência)
+                    $enviadas += GhostscriptHelper::converterPdfParaImagens($path, $nomeLote, $s3Prefix, $contador);
                 } else {
                     error_log("Tipo de arquivo ignorado no ZIP: {$name}");
                 }
@@ -62,6 +76,7 @@ final class ZipHelper
 
         return $enviadas;
     }
+
 
     private static function limparDir(string $dir): void
     {

@@ -129,7 +129,7 @@ $callback = function (AMQPMessage $msg) {
 
         $logger->info('ZIP baixado', ['zipLocalPath' => $zipLocalPath]);
 
-        $normalizedPrefix = "cliente/saeb/uploads/normalizadas/{$nomeLote}/";
+        $normalizedPrefix = "cliente/saeb/normalizadas/{$nomeLote}/";
         $totalImagens     = ZipHelper::processarZip($zipLocalPath, $normalizedPrefix);
 
         $logger->info('ZIP processado', [
@@ -141,26 +141,18 @@ $callback = function (AMQPMessage $msg) {
             throw new \RuntimeException('Nenhuma imagem normalizada enviada para o bucket.');
         }
 
-// 4) Avisar PHP: finished (usa callbackUrl original)
+        // 4) Avisar PHP: finished (usa callbackUrl original)
         enviarCallback($callbackUrl, [
             'nomeLote'         => $nomeLote,
             'event'            => 'finished',
             'normalizedPrefix' => $normalizedPrefix,
             'totalImagens'     => $totalImagens,
+            'loteIdNumerico'   => $loteId,
         ]);
 
-        // ✅ NÃO SOBRESCREVER callbackUrl!
-        // Envia para Java usando o MESMO callbackUrl original
-        RabbitMQHelper::enviarParaFila('respostas_queue', [
+        $logger->info('Finalização do Processamento', [
             'inputPath' => "s3://{$bucket}/{$normalizedPrefix}",
-            'nomeLote'  => $nomeLote,
-            'total'     => $totalImagens,
-            'loteIdNumerico' => $loteId,
-            'callbackUrl' => $callbackUrl,  // ✅ CORRETO: original do payload
-        ]);
-        $logger->info('Mensagem enviada para respostas_queue', [
-            'inputPath' => "s3://{$bucket}/{$normalizedPrefix}",
-            'callbackUrl' => $callbackUrl  // ✅ Log para confirmar
+            'callbackUrl' => $callbackUrl
         ]);
 
         // 6) Subir log para o S3
@@ -170,7 +162,8 @@ $callback = function (AMQPMessage $msg) {
             }
         }
 
-        $logS3Key = "cliente/saeb/uploads/{$nomeLote}/logs/{$logFileName}";
+        $zipDir = dirname($zipKey);
+        $logS3Key = "{$zipDir}/logs/{$logFileName}";
         S3Helper::uploadFile($logPath, $logS3Key);
         $logger->info('Log enviado para S3', ['logKey' => $logS3Key]);
 
