@@ -95,6 +95,6 @@ final class ZipHelper
                 : unlink($file->getRealPath());
         }
 
-        rmdir($dir);
+        @rmdir($dir);
     }
 }
