@@ -34,7 +34,7 @@ final class ZipHelper
 
             // ✅ Extrai nome do lote do prefixo S3
             // Ex: "cliente/saeb/normalizadas/LOTE123/" -> "LOTE123"
-            $nomeLote = basename(rtrim($s3Prefix, '/'));
+            $nomePacote = basename(rtrim($s3Prefix, '/'));
 
             // ✅ Contador para paginação sequencial
             $contador = 1;
@@ -53,7 +53,7 @@ final class ZipHelper
                 $ext  = strtolower(pathinfo($name, PATHINFO_EXTENSION));
 
                 if (in_array($ext, ['jpg', 'jpeg'], true)) {
-                    $novoNome = "{$nomeLote}_pag{$contador}.{$ext}";
+                    $novoNome = "{$nomePacote}_imagem{$contador}.{$ext}";
 
                     //Imagens: ImageMagick
                     //$enviadas += ImageMagickHelper::normalizarImagem($path, $novoNome, $s3Prefix);
@@ -63,7 +63,7 @@ final class ZipHelper
                     }
                 } elseif ($ext === 'pdf') {
                     // ✅ PDFs: Ghostscript (passa contador por referência para continuar sequência)
-                    $enviadas += GhostscriptHelper::converterPdfParaImagens($path, $nomeLote, $s3Prefix, $contador);
+                    $enviadas += GhostscriptHelper::converterPdfParaImagens($path, $nomePacote, $s3Prefix, $contador);
                 } else {
                     error_log("Tipo de arquivo ignorado no ZIP: {$name}");
                 }

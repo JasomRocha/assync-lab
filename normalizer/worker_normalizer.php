@@ -68,13 +68,13 @@ $callback = function (AMQPMessage $msg) {
         return;
     }
 
-    $nomeLote    = $data['nomeLote']    ?? null;
-    $zipKey      = $data['zipKey']      ?? null;
+    $tituloPacote    = $data['tituloPacote']    ?? null;
+    $chaveZip      = $data['chaveZip']      ?? null;
     $bucket      = $data['bucket']      ?? S3Helper::getBucket();
-    $loteId      = $data['loteIdNumerico']       ?? null;
+    $idPacote      = $data['idPacote']       ?? null;
     $callbackUrl = $data['callbackUrl'] ?? null;
 
-    if (!$nomeLote || !$zipKey || !$callbackUrl) {
+    if (!$tituloPacote || !$chaveZip || !$callbackUrl) {
         echo "[!] Campos obrigatórios ausentes, descartando.\n";
         $msg->ack();
         return;
@@ -88,24 +88,24 @@ $callback = function (AMQPMessage $msg) {
         return;
     }
 
-    $logFileName = 'lote_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $nomeLote) . '_' . date('Ymd_His') . '.log';
+    $logFileName = 'pacote_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $tituloPacote) . '_' . date('Ymd_His') . '.log';
     $logPath     = $logDir . DIRECTORY_SEPARATOR . $logFileName;
 
     $logger = new Logger('normalizer');
     $logger->pushHandler(new StreamHandler($logPath, Logger::DEBUG));
 
     $logger->info('Mensagem recebida para normalização', [
-        'nomeLote' => $nomeLote,
-        'loteId' => $loteId,
-        'zipKey'   => $zipKey,
+        'tituloPacote' => $tituloPacote,
+        'idPacote' => $idPacote,
+        'chaveZip'   => $chaveZip,
         'bucket'   => $bucket,
     ]);
 
     try {
         // 1) Avisar PHP: started
         enviarCallback($callbackUrl, [
-            'nomeLote' => $nomeLote,
-            'event'    => 'started',
+            'tituloPacote' => $tituloPacote,
+            'event'    => 'iniciado',
         ]);
         $logger->info('Callback started enviado', ['callbackUrl' => $callbackUrl]);
 
@@ -123,13 +123,13 @@ $callback = function (AMQPMessage $msg) {
 
         $s3->getObject([
             'Bucket' => $bucket,
-            'Key'    => $zipKey,
+            'Key'    => $chaveZip,
             'SaveAs' => $zipLocalPath,
         ]);
 
         $logger->info('ZIP baixado', ['zipLocalPath' => $zipLocalPath]);
 
-        $normalizedPrefix = "cliente/saeb/normalizadas/{$nomeLote}/";
+        $normalizedPrefix = "cliente/saeb/normalizadas/{$tituloPacote}/";
         $totalImagens     = ZipHelper::processarZip($zipLocalPath, $normalizedPrefix);
 
         $logger->info('ZIP processado', [
@@ -143,11 +143,11 @@ $callback = function (AMQPMessage $msg) {
 
         // 4) Avisar PHP: finished (usa callbackUrl original)
         enviarCallback($callbackUrl, [
-            'nomeLote'         => $nomeLote,
-            'event'            => 'finished',
+            'tituloPacote'     => $tituloPacote,
+            'event'            => 'finalizado',
             'normalizedPrefix' => $normalizedPrefix,
             'totalImagens'     => $totalImagens,
-            'loteIdNumerico'   => $loteId,
+            'idPacote'   => $idPacote,
         ]);
 
         $logger->info('Finalização do Processamento', [
@@ -162,23 +162,21 @@ $callback = function (AMQPMessage $msg) {
             }
         }
 
-        $zipDir = dirname($zipKey);
+        $zipDir = dirname($chaveZip);
         $logS3Key = "{$zipDir}/logs/{$logFileName}";
         S3Helper::uploadFile($logPath, $logS3Key);
         $logger->info('Log enviado para S3', ['logKey' => $logS3Key]);
 
-        // Limpeza
         if (file_exists($logPath)) {
             @unlink($logPath);
         }
         limparDiretorioRecursivo($tmpDir);
 
         $msg->ack();
-        echo "[✓] Lote {$nomeLote} normalizado ({$totalImagens} imagens).\n";
+        echo "[✓] Lote {$tituloPacote} normalizado ({$totalImagens} imagens).\n";
     } catch (\Throwable $e) {
         $logger->error('Erro ao processar lote', ['exception' => $e->getMessage()]);
 
-        // Fecha handlers antes de enviar log para o S3
         foreach ($logger->getHandlers() as $handler) {
             if ($handler instanceof StreamHandler) {
                 $handler->close();
@@ -190,7 +188,7 @@ $callback = function (AMQPMessage $msg) {
 
         if ($callbackUrl) {
             enviarCallback($callbackUrl, [
-                'nomeLote'     => $nomeLote,
+                'tituloPacote'     => $tituloPacote,
                 'event'        => 'error',
                 'errorMessage' => $e->getMessage(),
                 'logKey'       => $logS3Key,
@@ -202,7 +200,7 @@ $callback = function (AMQPMessage $msg) {
         }
 
         $msg->ack();
-        echo "[!] Erro ao processar lote {$nomeLote}: {$e->getMessage()}\n";
+        echo "[!] Erro ao processar lote {$tituloPacote}: {$e->getMessage()}\n";
     }
 };
 
