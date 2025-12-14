@@ -18,7 +18,7 @@ final class ZipHelper
      * - Envia todos os JPGs normalizados para o S3 usando S3Helper (via helpers chamados)
      * Retorna o total de imagens enviadas.
      */
-    public static function processarZip(string $zipPath, string $s3Prefix): int
+    public static function processarZip(string $zipPath, string $s3Prefix, int $pacoteId): int
     {
         $enviadas = 0;
         $tempDir  = sys_get_temp_dir() . DIRECTORY_SEPARATOR . uniqid('zip_', true);
@@ -32,11 +32,6 @@ final class ZipHelper
             $zip->extractTo($tempDir);
             $zip->close();
 
-            // ✅ Extrai nome do lote do prefixo S3
-            // Ex: "cliente/saeb/normalizadas/LOTE123/" -> "LOTE123"
-            $nomePacote = basename(rtrim($s3Prefix, '/'));
-
-            // ✅ Contador para paginação sequencial
             $contador = 1;
 
             $it = new RecursiveIteratorIterator(
@@ -53,20 +48,19 @@ final class ZipHelper
                 $ext  = strtolower(pathinfo($name, PATHINFO_EXTENSION));
 
                 if (in_array($ext, ['jpg', 'jpeg'], true)) {
-                    $novoNome = "{$nomePacote}_imagem{$contador}.{$ext}";
+                    $novoNome = "imagem-{$contador}.jpg";
+                    $enviadas += ImageMagickHelper::normalizarImagem($path, $novoNome, $s3Prefix);
 
-                    //Imagens: ImageMagick
-                    //$enviadas += ImageMagickHelper::normalizarImagem($path, $novoNome, $s3Prefix);
-                    if (S3Helper::uploadFile($path, $s3Prefix . $novoNome)) {
-                        $enviadas++;
+                    if ($enviadas > 0) {
                         $contador++;
                     }
+
                 } elseif ($ext === 'pdf') {
-                    // ✅ PDFs: Ghostscript (passa contador por referência para continuar sequência)
-                    $enviadas += GhostscriptHelper::converterPdfParaImagens($path, $nomePacote, $s3Prefix, $contador);
+                    $enviadas += GhostscriptHelper::converterPdfParaImagens($path, $pacoteId, $s3Prefix, $contador);
                 } else {
                     error_log("Tipo de arquivo ignorado no ZIP: {$name}");
                 }
+
             }
         } else {
             error_log("Não foi possível abrir o ZIP: {$zipPath}");

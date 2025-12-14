@@ -61,20 +61,19 @@ $channel->queue_declare($queueName, false, true, false, false);
 $callback = function (AMQPMessage $msg) {
     echo "[x] Mensagem recebida: ", $msg->getBody(), "\n";
 
-    $data = json_decode($msg->getBody(), true);
+    $data = json_decode($msg->getBody(), true, 512, JSON_THROW_ON_ERROR);
     if (!is_array($data)) {
         echo "[!] Payload inválido, descartando.\n";
         $msg->ack();
         return;
     }
 
-    $tituloPacote    = $data['tituloPacote']    ?? null;
-    $chaveZip      = $data['chaveZip']      ?? null;
+    $chaveS3      = $data['chaveS3']      ?? null;
     $bucket      = $data['bucket']      ?? S3Helper::getBucket();
-    $idPacote      = $data['idPacote']       ?? null;
+    $pacoteId      = $data['pacoteId']       ?? null;
     $callbackUrl = $data['callbackUrl'] ?? null;
 
-    if (!$tituloPacote || !$chaveZip || !$callbackUrl) {
+    if (!$chaveS3 || !$callbackUrl) {
         echo "[!] Campos obrigatórios ausentes, descartando.\n";
         $msg->ack();
         return;
@@ -88,23 +87,23 @@ $callback = function (AMQPMessage $msg) {
         return;
     }
 
-    $logFileName = 'pacote_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $tituloPacote) . '_' . date('Ymd_His') . '.log';
+    $logFileName = 'pacote_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $pacoteId) . '_' . date('Ymd_His') . '.log';
     $logPath     = $logDir . DIRECTORY_SEPARATOR . $logFileName;
 
     $logger = new Logger('normalizer');
     $logger->pushHandler(new StreamHandler($logPath, Logger::DEBUG));
 
     $logger->info('Mensagem recebida para normalização', [
-        'tituloPacote' => $tituloPacote,
-        'idPacote' => $idPacote,
-        'chaveZip'   => $chaveZip,
+        'pacoteId' => $pacoteId,
+        'chaveZip'   => $chaveS3,
         'bucket'   => $bucket,
+        'callbackUrl' => $callbackUrl,
     ]);
 
     try {
         // 1) Avisar PHP: started
         enviarCallback($callbackUrl, [
-            'tituloPacote' => $tituloPacote,
+            'pacoteId' => $pacoteId,
             'event'    => 'iniciado',
         ]);
         $logger->info('Callback started enviado', ['callbackUrl' => $callbackUrl]);
@@ -123,17 +122,20 @@ $callback = function (AMQPMessage $msg) {
 
         $s3->getObject([
             'Bucket' => $bucket,
-            'Key'    => $chaveZip,
+            'Key'    => $chaveS3,
             'SaveAs' => $zipLocalPath,
         ]);
 
         $logger->info('ZIP baixado', ['zipLocalPath' => $zipLocalPath]);
 
-        $normalizedPrefix = "cliente/saeb/normalizadas/{$tituloPacote}/";
-        $totalImagens     = ZipHelper::processarZip($zipLocalPath, $normalizedPrefix);
+        $partes = explode('/', $chaveS3);
+        $nomeCliente = $partes[0];
+
+        $chaveNormalizadas = $nomeCliente . '/saeb/normalizadas/' . $pacoteId . '/';
+        $totalImagens     = ZipHelper::processarZip($zipLocalPath, $chaveNormalizadas, $pacoteId);
 
         $logger->info('ZIP processado', [
-            'normalizedPrefix' => $normalizedPrefix,
+            'PrefixoS3' => $chaveS3,
             'totalImagens'     => $totalImagens,
         ]);
 
@@ -143,15 +145,14 @@ $callback = function (AMQPMessage $msg) {
 
         // 4) Avisar PHP: finished (usa callbackUrl original)
         enviarCallback($callbackUrl, [
-            'tituloPacote'     => $tituloPacote,
             'event'            => 'finalizado',
-            'normalizedPrefix' => $normalizedPrefix,
+            'PrefixoS3' => $chaveS3,
             'totalImagens'     => $totalImagens,
-            'idPacote'   => $idPacote,
+            'pacoteId'   => $pacoteId,
         ]);
 
         $logger->info('Finalização do Processamento', [
-            'inputPath' => "s3://{$bucket}/{$normalizedPrefix}",
+            'inputPath' => "s3://{$bucket}/{$chaveS3}}",
             'callbackUrl' => $callbackUrl
         ]);
 
@@ -162,7 +163,7 @@ $callback = function (AMQPMessage $msg) {
             }
         }
 
-        $zipDir = dirname($chaveZip);
+        $zipDir = dirname($chaveS3);
         $logS3Key = "{$zipDir}/logs/{$logFileName}";
         S3Helper::uploadFile($logPath, $logS3Key);
         $logger->info('Log enviado para S3', ['logKey' => $logS3Key]);
@@ -171,9 +172,9 @@ $callback = function (AMQPMessage $msg) {
             @unlink($logPath);
         }
         limparDiretorioRecursivo($tmpDir);
-
         $msg->ack();
-        echo "[✓] Lote {$tituloPacote} normalizado ({$totalImagens} imagens).\n";
+
+        echo "[✓] Lote {$pacoteId} normalizado ({$totalImagens} imagens).\n";
     } catch (\Throwable $e) {
         $logger->error('Erro ao processar lote', ['exception' => $e->getMessage()]);
 
@@ -183,12 +184,12 @@ $callback = function (AMQPMessage $msg) {
             }
         }
 
-        $logS3Key = "logs/normalizer/{$logFileName}";
+        $logS3Key = "{$zipDir}/logs/{$logFileName}";
         S3Helper::uploadFile($logPath, $logS3Key);
 
         if ($callbackUrl) {
             enviarCallback($callbackUrl, [
-                'tituloPacote'     => $tituloPacote,
+                'pacoteId'     => $pacoteId,
                 'event'        => 'error',
                 'errorMessage' => $e->getMessage(),
                 'logKey'       => $logS3Key,
@@ -200,11 +201,11 @@ $callback = function (AMQPMessage $msg) {
         }
 
         $msg->ack();
-        echo "[!] Erro ao processar lote {$tituloPacote}: {$e->getMessage()}\n";
+        echo "[!] Erro ao processar pacoteId #{$pacoteId}: {$e->getMessage()}\n";
     }
 };
 
-$channel->basic_qos(null, 1, null);
+$channel->basic_qos((int)null, 1, null);
 $channel->basic_consume($queueName, '', false, false, false, false, $callback);
 
 echo "[*] Aguardando mensagens em {$queueName}. Para sair, CTRL+C.\n";
@@ -214,7 +215,11 @@ while ($channel->is_consuming()) {
 }
 
 $channel->close();
-$connection->close();
+try {
+    $connection->close();
+} catch (Exception $e) {
+
+}
 
 /**
  * Callback HTTP para o PHP web.
