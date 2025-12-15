@@ -146,7 +146,7 @@ $callback = function (AMQPMessage $msg) {
         // 4) Avisar PHP: finished (usa callbackUrl original)
         enviarCallback($callbackUrl, [
             'event'            => 'finalizado',
-            'PrefixoS3' => $chaveS3,
+            'PrefixoS3' => $chaveNormalizadas,
             'totalImagens'     => $totalImagens,
             'pacoteId'   => $pacoteId,
         ]);
